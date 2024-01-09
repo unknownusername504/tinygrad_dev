@@ -15,12 +15,6 @@ def debug_print(*args, **kwargs):
         print(*args, **kwargs)
 
 
-def get_scalar_value(tensor: Tensor):
-    assert tensor.shape == (), "The tensor must be a scalar"
-    tensor.realize()  # Ensure the tensor's data is realized
-    return tensor.lazydata.base.realized.data.item()
-
-
 class set_nograd:
     def __init__(self, val):
         self.val = val
