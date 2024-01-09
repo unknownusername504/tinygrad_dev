@@ -323,16 +323,18 @@ class Generator:
         self.features_in = features_in
         self.batch_size = batch_size
 
+        self.complexity_scalar = 32
+
         # Reshape layer is useful as the input shape is (batch_size, features_in, timesteps_in)
         # The model will extract more information from the time series if we expand the features_in
         self.reshape_in = Reshape((batch_size, timesteps_in, features_in))
 
         linear1_input_dim = features_in
-        linear1_output_dim = linear1_input_dim * timesteps_in * 2
+        linear1_output_dim = linear1_input_dim * timesteps_in * self.complexity_scalar
         self.linear1 = Linear(linear1_input_dim, linear1_output_dim)
 
         gru1_input_shape = (timesteps_in * linear1_input_dim, linear1_output_dim)
-        gru1_hidden_units = gru1_input_shape[0] * 2
+        gru1_hidden_units = gru1_input_shape[0] * self.complexity_scalar
         gru1_output_shape = (batch_size, timesteps_in, gru1_hidden_units)
         debug_print(f"gru1_input_shape: {gru1_input_shape}")
         debug_print(f"gru1_hidden_units: {gru1_hidden_units}")
@@ -348,7 +350,7 @@ class Generator:
             gru1_output_shape[1],
             gru1_output_shape[2],
         )  # (num_steps, units) as return_sequences is True in GRU1
-        gru2_hidden_units = gru2_input_shape[0] * 2
+        gru2_hidden_units = gru2_input_shape[0] * self.complexity_scalar
         gru2_ouput_shape = (batch_size, timesteps_in, gru2_hidden_units)
         debug_print(f"gru2_ouput_shape: {gru2_ouput_shape}")
         self.gru2 = GRU(
@@ -418,16 +420,18 @@ class Discriminator:
         debug_print(f"disc features_in: {features_in}")
         debug_print(f"disc batch_size: {batch_size}")
 
+        self.complexity_scalar = 64
+
         self.reshape_in = Reshape((batch_size, timesteps_in, features_in))
 
         linear1_input_dim = features_in
         linear1_output_dim = (
             linear1_input_dim * timesteps_in
-        )  # Don't expand so that the discriminator is less powerful than the generator
+        )  # Don't expand much so that the discriminator is less powerful than the generator
         self.linear1 = Linear(linear1_input_dim, linear1_output_dim)
 
         lstm1_input_shape = (timesteps_in * linear1_input_dim, linear1_output_dim)
-        lstm1_hidden_layers = lstm1_input_shape[0] * 2
+        lstm1_hidden_layers = timesteps_in * features_in * self.complexity_scalar
         lstm1_hidden_output_shape = (batch_size, timesteps_in, lstm1_hidden_layers)
         lstm1_output_channels = (
             lstm1_hidden_output_shape[0]
@@ -600,17 +604,27 @@ class RMSprop(optim.Optimizer):
 # Combine the generator and discriminator into a GAN that implements wasserstein gradient penalty
 """ 
 TODO: Implement the following:
-1.) Minibatch Discrimination: This technique involves providing the discriminator with access to multiple examples in a minibatch, rather than making decisions based on individual samples. This allows the discriminator to identify if the generator is producing similar outputs for different inputs.
+1.) (*) Minibatch Discrimination: This technique involves providing the discriminator with access to multiple examples in a minibatch, rather than making decisions based on individual samples. This allows the discriminator to identify if the generator is producing similar outputs for different inputs.
 
-2.) Feature Matching: Instead of optimizing the generator to fool the discriminator, optimize it to make the statistics of the generated data match the real data. This can be done by matching the intermediate layer responses in the discriminator for real and generated samples.
+2.) (*) Feature Matching: Instead of optimizing the generator to fool the discriminator, optimize it to make the statistics of the generated data match the real data. This can be done by matching the intermediate layer responses in the discriminator for real and generated samples.
 
-3.) Historical Averaging: Keep track of the historical parameters of the generator and include a term in the loss function that penalizes deviation from the historical average. This encourages stability over time.
+3.) (**) Historical Averaging: Keep track of the historical parameters of the generator and include a term in the loss function that penalizes deviation from the historical average. This encourages stability over time.
 
-4.) Penalize the norm of the gradients (Gradient Penalty): This is a technique used in WGAN-GP (Wasserstein GAN with Gradient Penalty) to enforce the Lipschitz constraint, which helps to stabilize the training and prevent mode collapse.
+4.) (Done?) Penalize the norm of the gradients (Gradient Penalty): This is a technique used in WGAN-GP (Wasserstein GAN with Gradient Penalty) to enforce the Lipschitz constraint, which helps to stabilize the training and prevent mode collapse.
 
-5.) Use different architectures: Some GAN variants like Diverse GAN (DivGAN) and Unrolled GAN have been specifically designed to tackle mode collapse.
+5.) (***) Use different architectures: Some GAN variants like Diverse GAN (DivGAN) and Unrolled GAN have been specifically designed to tackle mode collapse.
 
-6.) Regularization: Techniques like dropout or noise injection can also help in preventing mode collapse by adding randomness to the generator's outputs.
+6.) (**) Regularization: Techniques like dropout or noise injection can also help in preventing mode collapse by adding randomness to the generator's outputs.
+
+7.) (**) Learning Rate Scheduler: Using a learning rate scheduler that reduces the learning rate over time can help in stabilizing the training process.
+
+8.) (*) Test Hinge Loss: Instead of using the Wasserstein loss, use the hinge loss, which is more stable and can help in preventing mode collapse.
+
+9.) (*) Attention: Attention mechanisms can be used to help the generator focus on different parts of the input sequence at different time steps.
+
+10.) (***) Decision Transformer: This is a transformer-based architecture that can be used to generate sequences of discrete tokens.
+
+11.) (***) Attuned Traininer: Implement a trainer that monitors the discriminator's accuracy and adjusts the generator's/disciminator's learning rate accordingly.
 """
 
 
@@ -630,6 +644,8 @@ class WGANGP:
         self.features_out = features_out
         self.batch_size = batch_size
         self.min_batch_size = min_batch_size
+        # Only take a slice of the last ~20% of time series data for the discriminator
+        self.slice_disc = int(timesteps_in * 0.2)
         self.generator = Generator(
             timesteps_in=timesteps_in,
             features_in=features_in,
@@ -638,16 +654,16 @@ class WGANGP:
             batch_size=batch_size,
         )
         self.discriminator = Discriminator(
-            timesteps_in=(timesteps_in + timesteps_out),
+            timesteps_in=(self.slice_disc + timesteps_out),
             features_in=features_out,
             batch_size=(batch_size * min_batch_size),
         )
 
         self.generator_optimizer = RMSprop(
-            get_parameters(self.generator), lr=0.01, alpha=0.2
+            get_parameters(self.generator), lr=0.0002, alpha=0.9
         )
         self.discriminator_optimizer = RMSprop(
-            get_parameters(self.discriminator), lr=0.005, alpha=0.4
+            get_parameters(self.discriminator), lr=0.0005, alpha=0.8
         )
 
         self.loss_gen = None
@@ -656,7 +672,8 @@ class WGANGP:
     def generate(self, x):
         # Concatenate the real data with the fake data
         debug_print(f"generate x.shape: {x.shape}")
-        y = Tensor(x.numpy()).cat(self.generator(x).realize(), dim=1)
+        x_slice = x[:, -(self.slice_disc) :, :]
+        y = x_slice.cat(self.generator(x).realize(), dim=1)
         debug_print(f"generate y.shape: {y.shape}")
 
         return y
@@ -695,7 +712,7 @@ class WGANGP:
 
         # Losses
         loss_gen = -y_dis_gen.mean()
-        loss_dis = y_dis_gen.mean() - y_dis_real.mean() + d_regularizer
+        loss_dis = (y_dis_gen.mean() - y_dis_real.mean()) + d_regularizer
 
         self.loss_gen = loss_gen.float()
         self.loss_dis = loss_dis.float()
@@ -705,8 +722,10 @@ class WGANGP:
         # Generate fake data
         y_fake = self.generate(x_real)
         # No idea why tensor math isn't working here
-        y_fake_np = y_fake.numpy()
-        y_real_np = y_real.numpy()
+        debug_print(f"y_fake.shape: {y_fake.shape}")
+        debug_print(f"y_real.shape: {y_real.shape}")
+        y_fake_np = (y_fake.squeeze().numpy())[-3:]
+        y_real_np = (y_real.squeeze().numpy())[-3:]
         debug_print(f"y_fake_np: {y_fake_np}")
         debug_print(f"y_real_np: {y_real_np}")
         # Root mean squared error
@@ -740,8 +759,8 @@ class WGANGP:
                 self.loss_dis.backward()
                 self.discriminator_optimizer.step()
 
-                # Train the generator 5 times for every 1 time the discriminator is trained
-                for _ in range(5):
+                # Train the generator 3 times for every 1 time the discriminator is trained
+                for _ in range(3):
                     self.generator_optimizer.zero_grad()
                     self.compute_loss(batch_x_real, batch_y_real)
                     self.loss_gen.backward()
@@ -760,27 +779,28 @@ class WGANGP:
 
             return avg_loss_gen, avg_loss_dis
 
-    def __call__(
-        self, train_x: List[Tensor], unsafe: Optional[bool] = False
-    ) -> List[Tensor]:
+    def __call__(self, train_x: Tensor, unsafe: Optional[bool] = False) -> Tensor:
         if not unsafe:
             # Assert that the train_x is the correct shape
+            # Check shape size is 3
             assert (
-                len(train_x) == self.batch_size
-            ), "train_x must be the same length as the batch size"
-            for x in train_x:
-                assert (
-                    x.shape[1] == self.generator.timesteps_in
-                ), "train_x must have the same number of timesteps as the generator"
-                assert (
-                    x.shape[2] == self.generator.features_in
-                ), "train_x must have the same number of features as the generator"
+                len(train_x.shape) == 3
+            ), "train_x must be a 3 dimensional tensor (batch_size, timesteps_in, features_in)"
+            assert (
+                train_x[0] == self.batch_size
+            ), "train_x must have the same batch size as the generator"
+            assert (
+                train_x.shape[1] == self.generator.timesteps_in
+            ), "train_x must have the same number of timesteps as the generator"
+            assert (
+                train_x.shape[2] == self.generator.features_in
+            ), "train_x must have the same number of features as the generator"
         with set_nograd(True):
             # Generate fake data
             return self.generate(train_x)
 
     def dummy_data(self):
-        num_data_points = 10
+        num_data_points = 16
         x_dummy = []
         y_dummy = []
         for _ in range(num_data_points):
@@ -790,10 +810,18 @@ class WGANGP:
             # Generate a sine wave based on the time sequence
             sine_wave = np.sin(time)
 
+            # Shift and normalize the sine wave between 0 and 1
+            sine_wave = (sine_wave + 1) / 2
+
             # Add some noise to the sine wave
             noise = np.random.normal(0, 0.1, (sine_wave.shape))
 
             sine_wave += noise
+
+            # Renormalize the sine wave between 0 and 1
+            sine_wave = (sine_wave - sine_wave.min()) / (
+                sine_wave.max() - sine_wave.min()
+            )
 
             sine_wave = sine_wave.reshape(
                 1, (self.timesteps_in + self.timesteps_out), self.features_out
@@ -803,7 +831,10 @@ class WGANGP:
             this_x_dummy = Tensor(sine_wave[:, : -self.timesteps_out, :])
 
             # Y is going to be the next 3 time steps of X aka the next 3 values of the sine wave
-            this_y_dummy = Tensor(sine_wave[:, :, :])
+            # With a slice of the last ~20% of time series data
+            this_y_dummy = Tensor(
+                sine_wave[:, -(self.timesteps_out + self.slice_disc) :, :]
+            )
 
             x_dummy.append(this_x_dummy)
             y_dummy.append(this_y_dummy)
@@ -836,9 +867,10 @@ def train_loop():
         losses_gen = []
         losses_dis = []
         for step in range(num_steps):
-            # Randomize the data
-            np.random.shuffle(x_dummy)
-            np.random.shuffle(y_dummy)
+            # Randomize the data by shuffling both x and y in the same order
+            p = np.random.permutation(len(x_dummy))
+            x_dummy = x_dummy[p]
+            y_dummy = y_dummy[p]
             # Train the model
             loss_gen, loss_dis = model.train_step(x_dummy, y_dummy)
             losses_gen.append(loss_gen)
@@ -853,6 +885,15 @@ def train_loop():
         print(f"avg_loss_gen: {avg_loss_gen} avg_loss_dis: {avg_loss_dis}")
         # Compute the accuracy of the model
         model.show_accuracy(x_dummy[0], y_dummy[0])
+        # Compare the final output to the real data
+        y_pred = model(x_dummy[0])
+        print(f"y_pred: {(y_pred.squeeze().numpy())[-3:]}")
+        print(f"y_dummy: {(y_dummy[0].squeeze().numpy())[-3:]}")
+        # Discriminate on the real data vs. the fake data
+        dis_real = model.discriminate(y_dummy[0])
+        dis_fake = model.discriminate(y_pred)
+        print(f"dis_real: {dis_real.item()}")
+        print(f"dis_fake: {dis_fake.item()}")
 
 
 if __name__ == "__main__":
