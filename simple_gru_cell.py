@@ -1,7 +1,8 @@
 from typing import Callable, List, MutableSequence, Optional, Tuple, Union
 
 import numpy as np
-from tinygrad.tinygrad.jit import TinyJit
+
+# from tinygrad.tinygrad.jit import TinyJit
 from tinygrad.tinygrad.nn.state import get_parameters
 from tinygrad.tinygrad.tensor import Tensor
 from tinygrad.tinygrad.nn import Linear, optim
@@ -385,23 +386,23 @@ class Generator:
 
     def __call__(self, x):
         # return x.sequential(self.layers)
-        debug_print(f"input.shape: {x.shape}")
+        debug_print(f"gen input.shape: {x.shape}")
         x = self.reshape_in(x)
-        debug_print(f"reshape_in.shape: {x.shape}")
+        debug_print(f"gen reshape_in.shape: {x.shape}")
         x = self.linear1(x)
         x = x.relu()
-        debug_print(f"linear1.shape: {x.shape}")
+        debug_print(f"gen linear1.shape: {x.shape}")
         x = self.gru1(x)
-        debug_print(f"gru1.shape: {x.shape}")
+        debug_print(f"gen gru1.shape: {x.shape}")
         x = self.gru2(x)
-        debug_print(f"gru2.shape: {x.shape}")
+        debug_print(f"gen gru2.shape: {x.shape}")
         x = self.flatten(x)
-        debug_print(f"flatten.shape: {x.shape}")
+        debug_print(f"gen flatten.shape: {x.shape}")
         x = self.linear2(x)
         x = x.relu()
-        debug_print(f"linear2.shape: {x.shape}")
+        debug_print(f"gen linear2.shape: {x.shape}")
         x = self.reshape_out(x)
-        debug_print(f"reshape_out.shape: {x.shape}")
+        debug_print(f"gen reshape_out.shape: {x.shape}")
         return x
 
 
@@ -412,6 +413,10 @@ class Discriminator:
         self.timesteps_in = timesteps_in
         self.features_in = features_in
         self.batch_size = batch_size
+
+        debug_print(f"disc timesteps_in: {timesteps_in}")
+        debug_print(f"disc features_in: {features_in}")
+        debug_print(f"disc batch_size: {batch_size}")
 
         self.reshape_in = Reshape((batch_size, timesteps_in, features_in))
 
@@ -456,15 +461,22 @@ class Discriminator:
 
     def __call__(self, x):
         # return x.sequential(self.layers)
+        debug_print(f"disc input.shape: {x.shape}")
         x = self.reshape_in(x)
+        debug_print(f"disc reshape_in.shape: {x.shape}")
         x = self.linear1(x)
         x = x.relu()
+        debug_print(f"disc linear1.shape: {x.shape}")
         x = self.lstm1(x)
+        debug_print(f"disc lstm1.shape: {x.shape}")
         x = self.flatten(x)
+        debug_print(f"disc flatten.shape: {x.shape}")
         x = self.linear2(x)
         x = x.dropout(0.2)
         x = x.sigmoid()
+        debug_print(f"disc linear2.shape: {x.shape}")
         x = x.squeeze()
+        debug_print(f"disc squeeze.shape: {x.shape}")
         return x
 
 
@@ -619,10 +631,16 @@ class WGANGP:
         self.batch_size = batch_size
         self.min_batch_size = min_batch_size
         self.generator = Generator(
-            timesteps_in, features_in, timesteps_out, features_out, batch_size
+            timesteps_in=timesteps_in,
+            features_in=features_in,
+            timesteps_out=timesteps_out,
+            features_out=features_out,
+            batch_size=batch_size,
         )
         self.discriminator = Discriminator(
-            timesteps_out, features_out, batch_size * min_batch_size
+            timesteps_in=(timesteps_in + timesteps_out),
+            features_in=features_out,
+            batch_size=(batch_size * min_batch_size),
         )
 
         self.generator_optimizer = RMSprop(
@@ -636,15 +654,24 @@ class WGANGP:
         self.loss_dis = None
 
     def generate(self, x):
-        return self.generator(x)
+        # Concatenate the real data with the fake data
+        debug_print(f"generate x.shape: {x.shape}")
+        y = Tensor(x.numpy()).cat(self.generator(x).realize(), dim=1)
+        debug_print(f"generate y.shape: {y.shape}")
+
+        return y
 
     def discriminate(self, y):
         return self.discriminator(y)
 
     def compute_gradients_penalty(self, y_real, y_gen):
+        debug_print(f"compute_gradients_penalty y_real.shape: {y_real.shape}")
+        debug_print(f"compute_gradients_penalty y_gen.shape: {y_gen.shape}")
         # Compute the gradients penalty
         epsilon = Tensor.rand(y_real.shape[0], 1, 1)
+        debug_print(f"compute_gradients_penalty epsilon.shape: {epsilon.shape}")
         x_hat = epsilon * y_real + (1.0 - epsilon) * y_gen
+        debug_print(f"compute_gradients_penalty x_hat.shape: {x_hat.shape}")
         with set_nograd(False):
             y_hat = self.discriminate(x_hat).float()
             y_hat.backward()
@@ -768,20 +795,15 @@ class WGANGP:
 
             sine_wave += noise
 
-            # Repeat the sine wave for each batch and feature
-            this_x_dummy = Tensor(
-                np.tile(
-                    sine_wave[: -self.timesteps_out],
-                    (self.batch_size, self.features_in, 1),
-                )
+            sine_wave = sine_wave.reshape(
+                1, (self.timesteps_in + self.timesteps_out), self.features_out
             )
 
+            # Repeat the sine wave for each batch and feature
+            this_x_dummy = Tensor(sine_wave[:, : -self.timesteps_out, :])
+
             # Y is going to be the next 3 time steps of X aka the next 3 values of the sine wave
-            this_y_dummy = Tensor(
-                sine_wave[self.timesteps_in :].reshape(
-                    1, self.timesteps_out, self.features_out
-                )
-            )
+            this_y_dummy = Tensor(sine_wave[:, :, :])
 
             x_dummy.append(this_x_dummy)
             y_dummy.append(this_y_dummy)
@@ -796,7 +818,7 @@ def train_loop():
     timesteps_in = 30
     features_in = 1
     timesteps_out = 3
-    features_out = 1
+    features_out = features_in
     batch_size = 1
     model = WGANGP(timesteps_in, features_in, timesteps_out, features_out, batch_size)
 
@@ -830,7 +852,7 @@ def train_loop():
         avg_loss_dis = np.mean(losses_dis)
         print(f"avg_loss_gen: {avg_loss_gen} avg_loss_dis: {avg_loss_dis}")
         # Compute the accuracy of the model
-        model.show_accuracy(x_dummy, y_dummy)
+        model.show_accuracy(x_dummy[0], y_dummy[0])
 
 
 if __name__ == "__main__":
