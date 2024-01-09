@@ -323,7 +323,7 @@ class Generator:
         self.features_in = features_in
         self.batch_size = batch_size
 
-        self.complexity_scalar = 32
+        self.complexity_scalar = 8
 
         # Reshape layer is useful as the input shape is (batch_size, features_in, timesteps_in)
         # The model will extract more information from the time series if we expand the features_in
@@ -402,6 +402,9 @@ class Generator:
         debug_print(f"gen flatten.shape: {x.shape}")
         x = self.linear2(x)
         x = x.relu()
+        # Sigmoid activation is used to ensure that the output is between 0 and 1
+        # This is because the data is normalized between 0 and 1
+        x = x.sigmoid()
         debug_print(f"gen linear2.shape: {x.shape}")
         x = self.reshape_out(x)
         debug_print(f"gen reshape_out.shape: {x.shape}")
@@ -420,7 +423,7 @@ class Discriminator:
         debug_print(f"disc features_in: {features_in}")
         debug_print(f"disc batch_size: {batch_size}")
 
-        self.complexity_scalar = 64
+        self.complexity_scalar = 32
 
         self.reshape_in = Reshape((batch_size, timesteps_in, features_in))
 
@@ -644,8 +647,8 @@ class WGANGP:
         self.features_out = features_out
         self.batch_size = batch_size
         self.min_batch_size = min_batch_size
-        # Only take a slice of the last ~20% of time series data for the discriminator
-        self.slice_disc = int(timesteps_in * 0.2)
+        # Only take a slice of the last ~50% of time series data for the discriminator
+        self.slice_disc = int(timesteps_in // 2)
         self.generator = Generator(
             timesteps_in=timesteps_in,
             features_in=features_in,
@@ -660,10 +663,10 @@ class WGANGP:
         )
 
         self.generator_optimizer = RMSprop(
-            get_parameters(self.generator), lr=0.0002, alpha=0.9
+            get_parameters(self.generator), lr=0.005, alpha=0.9
         )
         self.discriminator_optimizer = RMSprop(
-            get_parameters(self.discriminator), lr=0.0005, alpha=0.8
+            get_parameters(self.discriminator), lr=0.0075, alpha=0.75
         )
 
         self.loss_gen = None
@@ -805,7 +808,11 @@ class WGANGP:
         y_dummy = []
         for _ in range(num_data_points):
             # Create a time sequence from 0 to 2*pi
-            time = np.linspace(0, 2 * np.pi, self.timesteps_in + self.timesteps_out)
+            # Small shift for randomization
+            shift = np.random.uniform(0, 2 * np.pi)
+            start = 0 + shift
+            end = 2 * np.pi + shift
+            time = np.linspace(start, end, self.timesteps_in + self.timesteps_out)
 
             # Generate a sine wave based on the time sequence
             sine_wave = np.sin(time)
@@ -831,7 +838,7 @@ class WGANGP:
             this_x_dummy = Tensor(sine_wave[:, : -self.timesteps_out, :])
 
             # Y is going to be the next 3 time steps of X aka the next 3 values of the sine wave
-            # With a slice of the last ~20% of time series data
+            # With a slice of the time series data
             this_y_dummy = Tensor(
                 sine_wave[:, -(self.timesteps_out + self.slice_disc) :, :]
             )
@@ -846,9 +853,9 @@ class WGANGP:
 
 
 def train_loop():
-    timesteps_in = 30
+    timesteps_in = 16
     features_in = 1
-    timesteps_out = 3
+    timesteps_out = 4
     features_out = features_in
     batch_size = 1
     model = WGANGP(timesteps_in, features_in, timesteps_out, features_out, batch_size)
@@ -860,8 +867,8 @@ def train_loop():
     debug_print(f"x_dummy.shape: {x_dummy[0].shape}")
     debug_print(f"y_dummy.shape: {y_dummy[0].shape}")
 
-    num_epochs = 5
-    num_steps = 10
+    num_epochs = 20
+    num_steps = 100
     for epoch in range(num_epochs):
         print(f"Epoch {epoch+1}/{num_epochs}")
         losses_gen = []
